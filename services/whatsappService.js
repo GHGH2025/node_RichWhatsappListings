@@ -122,11 +122,11 @@ sock.ev.on("messages.upsert", async ({ messages }) => {
       }
 
       // save file
-      const mediaDir = "./public/media";
-      fs.mkdirSync(mediaDir, { recursive: true });
-      filePath = `${mediaDir}/${Date.now()}_${jid}.${ext}`;
-      fs.writeFileSync(filePath, buffer);
-      console.log(`💾 Saved media to ${filePath}`);
+      // const mediaDir = "./public/media";
+      // fs.mkdirSync(mediaDir, { recursive: true });
+      // filePath = `${mediaDir}/${Date.now()}_${jid}.${ext}`;
+      // fs.writeFileSync(filePath, buffer);
+      // console.log(`💾 Saved media to ${filePath}`);
     } catch (err) {
       console.error("Media download error:", err);
     }
