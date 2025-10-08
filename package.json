@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-app",
+  "version": "1.0.0",
+  "type": "module",       
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.3",
+    "body-parser": "^2.2.0",
+    "express": "^5.1.0",
+    "node-cache": "^5.1.2",
+    "qrcode": "^1.5.4"
+  }
+}
