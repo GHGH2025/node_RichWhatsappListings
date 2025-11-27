@@ -146,26 +146,72 @@ router.post("/group/send", async (req, res) => {
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: "not connected" });
 
-    const { group, text } = req.body;
-    if (!group || !text) return res.status(400).json({ error: "need 'group' and 'text'" });
+    let { jids, text, imageUrl } = req.body;
 
-    try {
-      const jid = await findGroupJidByName(sock, group);
-
-      await sock.sendMessage(jid, { text });
-      console.log(`📤 Sent to group '${group}' (${jid}): ${text}`);
-
-      addMessage({
-        id: Date.now(),
-        jid,
-        text: `(out to group ${group}) ${text}`,
-        timestamp: Date.now()
-      });
-
-      res.json({ status: "sent", group, jid });
-    } catch (err) {
-      res.status(404).json({ error: err.message });
+    // require jids + at least one of text or image
+    if (!jids || (!text && !imageUrl)) {
+      return res
+        .status(400)
+        .json({ error: "need 'jids' and either 'text' or 'imageUrl'" });
     }
+
+    // normalize to array
+    const groupJids = Array.isArray(jids) ? jids : [jids];
+
+    // quick public URL check for image
+    const isHttpUrl = (u) =>
+      typeof u === "string" && /^https?:\/\/\S+$/i.test(u);
+
+    if (imageUrl && !isHttpUrl(imageUrl)) {
+      return res
+        .status(400)
+        .json({ error: "'imageUrl' must be a public http(s) URL" });
+    }
+
+    // Optional: normalize group JID (allow passing just numeric part)
+    const normalizeGroupJid = (g) =>
+      g.includes("@") ? g : `${g}@g.us`;
+
+    const results = [];
+
+    for (const g of groupJids) {
+      const jid = normalizeGroupJid(g);
+
+      // Build the message payload (same idea as /send)
+      const msg = imageUrl
+        ? { image: { url: imageUrl }, caption: text || undefined }
+        : { text };
+
+      try {
+        await sock.sendMessage(jid, msg);
+
+        console.log(
+          `📤 Sent to group JID '${g}' (${jid}): ${
+            imageUrl ? `[image: ${imageUrl}] ${text || ""}` : text
+          }`
+        );
+
+        addMessage({
+          id: Date.now(), // or your shared nextMessageId()
+          jid,
+          text: imageUrl
+            ? `(out to group ${jid}) [image] ${text || ""}`
+            : `(out to group ${jid}) ${text}`,
+          timestamp: Date.now()
+        });
+
+        results.push({ jid, status: "sent" });
+      } catch (err) {
+        console.error(`❌ Failed to send to group '${jid}':`, err.message);
+        results.push({
+          jid,
+          status: "failed",
+          error: err.message
+        });
+      }
+    }
+
+    res.json({ results });
   } catch (e) {
     console.error("Group send error:", e);
     res.status(500).json({ error: e?.message || String(e) });
@@ -186,6 +232,7 @@ router.get("/group/:name", async (req, res) => {
       const out = getMessages(since).filter(m => m.jid === jid);
 
       res.json({
+        jid:jid,
         last: out.length ? out[out.length - 1].id : since,
         messages: out
       });
