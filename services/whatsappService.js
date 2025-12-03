@@ -1,4 +1,5 @@
 // services/whatsappService.js
+import "dotenv/config"; // NEW: loads .env
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -14,6 +15,51 @@ fs.mkdirSync(authDir, { recursive: true });
 let sock;
 const msgs = [];
 let nextId = 1;
+
+// NEW: webhook + base URL
+const WEBHOOK_URL = process.env.WHATSAPP_STATUS_WEBHOOK_URL || "";
+const APP_BASE_URL = process.env.APP_BASE_URL || "http://localhost:3001";
+
+// NEW: helper to notify external webhook
+async function notifyStatusWebhook(event, extra = {}) {
+  if (!WEBHOOK_URL) {
+    console.warn("⚠️ WHATSAPP_STATUS_WEBHOOK_URL not set, skipping webhook:", event);
+    return;
+  }
+
+  try {
+    const payload = {
+      event,                         // 'connected', 'disconnected', 'logged_out', 'qr'
+      timestamp: new Date().toISOString(),
+      ...extra
+    };
+
+    // Node 18+ has global fetch. If you're on Node <18, install node-fetch and import it.
+    const res = await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    console.log(`🌍 Webhook (${event}) status:`, res.status);
+  } catch (err) {
+    console.error("❌ Error sending status webhook:", err.message || err);
+  }
+}
+
+// 🔹 helper: delete auth folder & recreate it
+function resetAuthFolder() {
+  try {
+    if (fs.existsSync(authDir)) {
+      fs.rmSync(authDir, { recursive: true, force: true });
+      console.log("🧹 Deleted auth folder");
+    }
+    fs.mkdirSync(authDir, { recursive: true });
+    console.log("📁 Re-created auth folder");
+  } catch (err) {
+    console.error("❌ Failed to reset auth folder:", err.message || err);
+  }
+}
 
 export function getSock() {
   return sock;
@@ -43,7 +89,13 @@ export async function startSock() {
       console.log("📲 QR code received, saving to ,/public/qr.png");
       await QRCode.toFile("./public/qr.png", qr, { width: 300 });
     }
-    if (connection === "open") console.log("✅ WhatsApp connected");
+    // if (connection === "open") console.log("✅ WhatsApp connected");
+    if (connection === "open") {
+      console.log("✅ WhatsApp connected");
+      await notifyStatusWebhook("connected", {
+        message: "WhatsApp session is connected"
+      });
+    }
     if (connection === "close") {
       const reason = lastDisconnect?.error?.output?.statusCode;
       console.log("❌ Disconnected:", reason, DisconnectReason[reason]);
@@ -52,6 +104,18 @@ export async function startSock() {
         startSock();
       } else {
         console.log("⚠️ Logged out — delete auth/ and rescan QR");
+
+        resetAuthFolder();
+
+        await notifyStatusWebhook("logged_out", {
+          message: "WhatsApp session logged out, please delete auth/ and rescan QR",
+          needRescan: true,
+          reasonCode: reason,
+          reasonText: DisconnectReason[reason]
+        });
+        
+        console.log("🔄 Starting new session for fresh QR...");
+        startSock();
       }
     }
   });
