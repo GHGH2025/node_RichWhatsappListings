@@ -1,10 +1,6 @@
 // routes/messageRoutes.js
 import express from "express";
-import { getSock, getMessages, addMessage ,findGroupJidByName } from "../services/whatsappService.js";
-import { createRequire } from 'module';
-
-const require = createRequire(import.meta.url);
-
+import { getSock, getMessages, addMessage, findGroupJidByName } from "../services/whatsappService.js";
 
 const router = express.Router();
 
@@ -245,3 +241,5 @@ router.get("/group/:name", async (req, res) => {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
+export default router;
