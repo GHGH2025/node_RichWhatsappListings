@@ -1,11 +1,18 @@
 {
   "name": "whatsapp-app",
   "version": "1.0.0",
-  "type": "module",       
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.3",
     "body-parser": "^2.2.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
     "express": "^5.1.0",
+    "mongoose": "^9.7.4",
+    "morgan": "^1.11.0",
     "node-cache": "^5.1.2",
     "qrcode": "^1.5.4"
   }
