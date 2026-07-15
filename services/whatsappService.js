@@ -1,5 +1,5 @@
 // services/whatsappService.js
-import "dotenv/config"; // NEW: loads .env
+import "dotenv/config";
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -8,6 +8,12 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import fs from "fs";
+import {
+  isTrackedSender,
+  getTrackedGroupName,
+} from "./trackConfigCache.js";
+import { TrackedMessage } from "../models/trackedMessage.js";
+import { phoneFromJid } from "../utils/phone.js";
 
 const authDir = "./auth";
 fs.mkdirSync(authDir, { recursive: true });
@@ -16,11 +22,9 @@ let sock;
 const msgs = [];
 let nextId = 1;
 
-// NEW: webhook + base URL
 const WEBHOOK_URL = process.env.WHATSAPP_STATUS_WEBHOOK_URL || "";
 const APP_BASE_URL = process.env.APP_BASE_URL || "http://localhost:3001";
 
-// NEW: helper to notify external webhook
 async function notifyStatusWebhook(event, extra = {}) {
   if (!WEBHOOK_URL) {
     console.warn("⚠️ WHATSAPP_STATUS_WEBHOOK_URL not set, skipping webhook:", event);
@@ -29,12 +33,11 @@ async function notifyStatusWebhook(event, extra = {}) {
 
   try {
     const payload = {
-      event,                         // 'connected', 'disconnected', 'logged_out', 'qr'
+      event,
       timestamp: new Date().toISOString(),
       ...extra
     };
 
-    // Node 18+ has global fetch. If you're on Node <18, install node-fetch and import it.
     const res = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -47,7 +50,6 @@ async function notifyStatusWebhook(event, extra = {}) {
   }
 }
 
-// 🔹 helper: delete auth folder & recreate it
 function resetAuthFolder() {
   try {
     if (fs.existsSync(authDir)) {
@@ -71,6 +73,81 @@ export function addMessage(msg) {
   msgs.push(msg);
 }
 
+function extractMessageContent(m) {
+  const msgTypeKey = Object.keys(m.message)[0];
+  let text = "";
+  let type = "";
+
+  if (msgTypeKey === "conversation") {
+    text = m.message.conversation;
+    type = "text";
+  } else if (msgTypeKey === "extendedTextMessage") {
+    text = m.message.extendedTextMessage.text;
+    type = "extendedText";
+  } else if (msgTypeKey === "imageMessage") {
+    text = m.message.imageMessage.caption || "";
+    type = "image";
+  } else if (msgTypeKey === "videoMessage") {
+    text = m.message.videoMessage.caption || "";
+    type = "video";
+  } else if (msgTypeKey === "audioMessage") {
+    text = "";
+    type = "audio";
+  } else if (msgTypeKey === "documentMessage") {
+    text = m.message.documentMessage.fileName || "";
+    type = "document";
+  } else if (msgTypeKey === "reactionMessage") {
+    text = m.message.reactionMessage?.text || "";
+    type = "reaction";
+  } else {
+    type = msgTypeKey;
+  }
+
+  return { msgTypeKey, text, type };
+}
+
+async function persistTrackedMessage(m, { jid, text, type }) {
+  const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
+  if (!isGroup) return;
+
+  const senderJid = m.key.participant || "";
+  const senderPhone = phoneFromJid(senderJid);
+  if (!senderPhone || !isTrackedSender(jid, senderPhone)) return;
+
+  const messageId = m.key.id || "";
+  if (!messageId) return;
+
+  const tsSeconds = m.messageTimestamp
+    ? Number(m.messageTimestamp)
+    : Math.floor(Date.now() / 1000);
+
+  try {
+    await TrackedMessage.updateOne(
+      { group_jid: jid, message_id: messageId },
+      {
+        $setOnInsert: {
+          group_jid: jid,
+          group_name: getTrackedGroupName(jid),
+          sender_phone: senderPhone,
+          sender_jid: senderJid,
+          message_id: messageId,
+          type,
+          text: text || "",
+          timestamp: new Date(tsSeconds * 1000),
+          raw: {
+            fromMe: Boolean(m.key.fromMe),
+            pushName: m.pushName || "",
+          },
+        },
+      },
+      { upsert: true }
+    );
+    console.log(`💾 Tracked [${jid}] ${senderPhone}: (${type}) ${text}`);
+  } catch (err) {
+    console.error("❌ Failed to persist tracked message:", err.message || err);
+  }
+}
+
 export async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -89,7 +166,6 @@ export async function startSock() {
       console.log("📲 QR code received, saving to ,/public/qr.png");
       await QRCode.toFile("./public/qr.png", qr, { width: 300 });
     }
-    // if (connection === "open") console.log("✅ WhatsApp connected");
     if (connection === "open") {
       console.log("✅ WhatsApp connected");
       await notifyStatusWebhook("connected", {
@@ -113,116 +189,58 @@ export async function startSock() {
           reasonCode: reason,
           reasonText: DisconnectReason[reason]
         });
-        
+
         console.log("🔄 Starting new session for fresh QR...");
         startSock();
       }
     }
   });
 
-sock.ev.on("messages.upsert", async ({ messages }) => {
+  sock.ev.on("messages.upsert", async ({ messages, type: upsertType }) => {
+    // Prefer live notifies; still accept missing type for older Baileys behavior
+    if (upsertType && upsertType !== "notify") return;
 
-  const m = messages[0];
-  if (!m?.message) return;
+    const m = messages[0];
+    if (!m?.message) return;
+    if (m.key?.fromMe) return;
 
-  const msgTypeKey = Object.keys(m.message)[0]; // Baileys key
-  const jid = m.key.remoteJid;
+    const jid = m.key.remoteJid;
+    const { msgTypeKey, text, type } = extractMessageContent(m);
+    let filePath = null;
 
-  let text = "";
-  let type = "";
-  let filePath = null;
-
-  // Simplified type + text extraction
-  if (msgTypeKey === "conversation") {
-    text = m.message.conversation;
-    type = "text";
-  } else if (msgTypeKey === "extendedTextMessage") {
-    text = m.message.extendedTextMessage.text;
-    type = "extendedText";
-  } else if (msgTypeKey === "imageMessage") {
-    text = m.message.imageMessage.caption || "";
-    type = "image";
-  } else if (msgTypeKey === "videoMessage") {
-    text = m.message.videoMessage.caption || "";
-    type = "video";
-  } else if (msgTypeKey === "audioMessage") {
-    text = ""; // no caption in audio
-    type = "audio";
-  } else if (msgTypeKey === "documentMessage") {
-    text = m.message.documentMessage.fileName || "";
-    type = "document";
-  }
-  else if(msgTypeKey === "reactionMessage"){
-       const reaction = m.message.reactionMessage;
-        text = reaction.text;
-        type = "reaction";
-    }
-  else {
-    type = msgTypeKey;
-  }
-
-  // Media download
-  if (["imageMessage", "videoMessage", "documentMessage", "audioMessage"].includes(msgTypeKey)) {
-    try {
-      const buffer = await downloadMediaMessage(m, "buffer", {}, { logger: sock.logger });
-
-      // determine extension based on mimetype or fileName
-      let ext = "bin";
-      if (msgTypeKey === "imageMessage") {
-        ext = "jpg";
-      } else if (msgTypeKey === "videoMessage") {
-        const mime = m.message.videoMessage?.mimetype || "";
-        if (mime.includes("mp4")) ext = "mp4";
-        else if (mime.includes("3gpp")) ext = "3gp";
-        else ext = "mp4";
-      } else if (msgTypeKey === "audioMessage") {
-        const mime = m.message.audioMessage?.mimetype || "";
-        if (mime.includes("ogg")) ext = "ogg";
-        else if (mime.includes("mp3")) ext = "mp3";
-        else if (mime.includes("wav")) ext = "wav";
-        else ext = "opus"; // WhatsApp voice notes
-      } else if (msgTypeKey === "documentMessage") {
-        ext = m.message.documentMessage?.fileName?.split(".").pop() || "bin";
+    // Media download (buffer only; file save remains disabled)
+    if (["imageMessage", "videoMessage", "documentMessage", "audioMessage"].includes(msgTypeKey)) {
+      try {
+        await downloadMediaMessage(m, "buffer", {}, { logger: sock.logger });
+      } catch (err) {
+        console.error("Media download error:", err);
       }
-
-      // save file
-      // const mediaDir = "./public/media";
-      // fs.mkdirSync(mediaDir, { recursive: true });
-      // filePath = `${mediaDir}/${Date.now()}_${jid}.${ext}`;
-      // fs.writeFileSync(filePath, buffer);
-      // console.log(`💾 Saved media to ${filePath}`);
-    } catch (err) {
-      console.error("Media download error:", err);
     }
-  }
 
-  // Save entry in memory
-  const entry = {
-    id: nextId++,
-    jid,
-    text,
-    type,
-    filePath,
-    timestamp: Date.now()
-  };
+    const entry = {
+      id: nextId++,
+      jid,
+      text,
+      type,
+      filePath,
+      timestamp: Date.now()
+    };
 
-  addMessage(entry);
-  console.log(`📥 [${jid}] (${type}) ${text}`);
-});
+    addMessage(entry);
+    console.log(`📥 [${jid}] (${type}) ${text}`);
 
-
+    await persistTrackedMessage(m, { jid, text, type });
+  });
 }
 
 export async function findGroupJidByName(sock, name) {
   if (!sock) throw new Error("Socket not connected");
 
-  // fetch joined groups
   const groups = await sock.groupFetchAllParticipating();
   const values = Object.values(groups);
 
   const group = values.find(g => g.subject.toLowerCase() === name.toLowerCase());
   if (!group) throw new Error(`Group '${name}' not found`);
 
-  return group.id; // this is the JID like 1203630xxxxx@g.us
+  return group.id;
 }
-
