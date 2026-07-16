@@ -1,6 +1,5 @@
 import NodeCache from "node-cache";
-import { GroupTrackConfig } from "../models/groupTrackConfig.js";
-import { normalizePhone } from "../utils/phone.js";
+import { WhatsappGroupTrackConfigs } from "../models/whatsapp_group_track_configs.js";
 
 const CACHE_KEY = "active_track_configs";
 
@@ -8,7 +7,7 @@ const CACHE_KEY = "active_track_configs";
 const cache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 
 /**
- * Build Map: group_jid → Set(active phones as digits)
+ * Build Map: group_jid → Set(active participant JIDs)
  * Only includes active configs and active people.
  */
 function buildLookupMap(configs) {
@@ -17,15 +16,15 @@ function buildLookupMap(configs) {
   for (const cfg of configs) {
     if (!cfg?.active || !cfg.group_jid) continue;
 
-    const phones = new Set();
+    const participants = new Set();
     for (const person of cfg.people || []) {
       if (!person?.active) continue;
-      const phone = normalizePhone(person.phone);
-      if (phone) phones.add(phone);
+      const participant = String(person.participant || "").trim();
+      if (participant) participants.add(participant);
     }
 
-    if (phones.size > 0) {
-      map.set(cfg.group_jid, phones);
+    if (participants.size > 0) {
+      map.set(cfg.group_jid, participants);
     }
   }
 
@@ -33,7 +32,7 @@ function buildLookupMap(configs) {
 }
 
 export async function loadTrackConfigCache() {
-  const configs = await GroupTrackConfig.find({ active: true }).lean();
+  const configs = await WhatsappGroupTrackConfigs.find({ active: true }).lean();
   const map = buildLookupMap(configs);
   cache.set(CACHE_KEY, map);
 
@@ -56,12 +55,13 @@ function getMap() {
   return cache.get(CACHE_KEY) || new Map();
 }
 
-export function isTrackedSender(groupJid, phone) {
-  if (!groupJid || !phone) return false;
+/** True if group_jid is tracked and participant JID is in that group's people. */
+export function isTrackedParticipant(groupJid, participantJid) {
+  if (!groupJid || !participantJid) return false;
   const map = getMap();
-  const phones = map.get(groupJid);
-  if (!phones) return false;
-  return phones.has(normalizePhone(phone));
+  const participants = map.get(groupJid);
+  if (!participants) return false;
+  return participants.has(String(participantJid).trim());
 }
 
 export function getTrackedGroupName(groupJid) {

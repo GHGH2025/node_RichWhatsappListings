@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 
-const trackedMessageSchema = new mongoose.Schema(
+const whatsappTrackedMessagesSchema = new mongoose.Schema(
   {
     group_jid: { type: String, required: true, index: true },
     group_name: { type: String, default: "" },
@@ -11,12 +11,16 @@ const trackedMessageSchema = new mongoose.Schema(
     text: { type: String, default: "" },
     timestamp: { type: Date, default: Date.now, index: true },
     raw: { type: mongoose.Schema.Types.Mixed, default: null },
+    status: { type: String, enum: ["pending", "processing", "processed", "error"], default: "pending" },
+    errorMessage: { type: String, default: "" },
   },
   { collection: "whatsapp_tracked_messages" }
 );
 
-trackedMessageSchema.index({ group_jid: 1, message_id: 1 }, { unique: true });
+whatsappTrackedMessagesSchema.index({ group_jid: 1, message_id: 1 }, { unique: true });
 
-export const TrackedMessage =
-  mongoose.models.TrackedMessage ||
-  mongoose.model("TrackedMessage", trackedMessageSchema);
+export const WhatsappTrackedMessages =
+  mongoose.models.WhatsappTrackedMessages ||
+  mongoose.model("WhatsappTrackedMessages", whatsappTrackedMessagesSchema);
+
+whatsappTrackedMessagesSchema.index({ status: 1 });

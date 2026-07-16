@@ -1,7 +1,7 @@
 import express from "express";
 import { getSock } from "../services/whatsappService.js";
-import { GroupTrackConfig } from "../models/groupTrackConfig.js";
-import { TrackedMessage } from "../models/trackedMessage.js";
+import { WhatsappGroupTrackConfigs } from "../models/whatsapp_group_track_configs.js";
+import { WhatsappTrackedMessages } from "../models/whatsapp_tracked_messages.js";
 import { refreshTrackConfigCache } from "../services/trackConfigCache.js";
 import { normalizePhone, phoneFromJid } from "../utils/phone.js";
 
@@ -19,6 +19,8 @@ function normalizePeople(people) {
       phone: normalizePhone(p?.phone),
       name: String(p?.name || "").trim(),
       active: p?.active !== false,
+      // Accept either `participant` or participants API `jid`
+      participant: String(p?.participant || p?.jid || "").trim(),
     }))
     .filter((p) => p.phone);
 }
@@ -52,11 +54,16 @@ router.get("/groups/:jid/participants", async (req, res) => {
 
     const jid = normalizeGroupJid(decodeURIComponent(req.params.jid));
     const meta = await sock.groupMetadata(jid);
-    const participants = (meta.participants || []).map((p) => ({
-      jid: p.id,
-      phone: phoneFromJid(p.id),
-      admin: p.admin || null,
-    }));
+    const participants = (meta.participants || []).map((p) => {
+      // Prefer PN JID (phoneNumber); never treat @lid id digits as a phone
+      const pnJid = p.phoneNumber || (String(p.id || "").endsWith("@s.whatsapp.net") ? p.id : "");
+      return {
+        jid: p.id,
+        phone: phoneFromJid(pnJid),
+        admin: p.admin || null,
+        
+      };
+    });
 
     res.json({
       jid,
@@ -72,7 +79,7 @@ router.get("/groups/:jid/participants", async (req, res) => {
 /** GET /track-configs */
 router.get("/track-configs", async (_req, res) => {
   try {
-    const configs = await GroupTrackConfig.find().sort({ updated_at: -1 }).lean();
+    const configs = await WhatsappGroupTrackConfigs.find().sort({ updated_at: -1 }).lean();
     res.json(configs);
   } catch (e) {
     console.error("GET /track-configs error:", e);
@@ -83,7 +90,7 @@ router.get("/track-configs", async (_req, res) => {
 /** GET /track-configs/:id */
 router.get("/track-configs/:id", async (req, res) => {
   try {
-    const config = await GroupTrackConfig.findById(req.params.id).lean();
+    const config = await WhatsappGroupTrackConfigs.findById(req.params.id).lean();
     if (!config) return res.status(404).json({ error: "not found" });
     res.json(config);
   } catch (e) {
@@ -101,7 +108,7 @@ router.post("/track-configs", async (req, res) => {
     }
 
     const people = normalizePeople(req.body?.people);
-    const doc = await GroupTrackConfig.create({
+    const doc = await WhatsappGroupTrackConfigs.create({
       group_jid,
       group_name: String(req.body?.group_name || "").trim(),
       active: req.body?.active !== false,
@@ -137,7 +144,7 @@ router.put("/track-configs/:id", async (req, res) => {
       updates.group_jid = normalizeGroupJid(req.body.group_jid);
     }
 
-    const doc = await GroupTrackConfig.findByIdAndUpdate(req.params.id, updates, {
+    const doc = await WhatsappGroupTrackConfigs.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
     });
@@ -158,7 +165,7 @@ router.put("/track-configs/:id", async (req, res) => {
 /** DELETE /track-configs/:id */
 router.delete("/track-configs/:id", async (req, res) => {
   try {
-    const doc = await GroupTrackConfig.findByIdAndDelete(req.params.id);
+    const doc = await WhatsappGroupTrackConfigs.findByIdAndDelete(req.params.id);
     if (!doc) return res.status(404).json({ error: "not found" });
 
     await refreshTrackConfigCache();
@@ -187,7 +194,7 @@ router.get("/tracked-messages", async (req, res) => {
     }
 
     const limit = Math.min(parseInt(req.query.limit || "100", 10) || 100, 500);
-    const messages = await TrackedMessage.find(filter)
+    const messages = await WhatsappTrackedMessages.find(filter)
       .sort({ timestamp: -1 })
       .limit(limit)
       .lean();
