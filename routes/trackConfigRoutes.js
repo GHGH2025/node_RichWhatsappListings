@@ -12,12 +12,17 @@ function normalizeGroupJid(jid) {
   return String(jid).includes("@") ? String(jid) : `${jid}@g.us`;
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function normalizePeople(people) {
   if (!Array.isArray(people)) return [];
   return people
     .map((p) => ({
       phone: normalizePhone(p?.phone),
       name: String(p?.name || "").trim(),
+      email: normalizeEmail(p?.email),
       active: p?.active !== false,
       // Accept either `participant` or participants API `jid`
       participant: String(p?.participant || p?.jid || "").trim(),

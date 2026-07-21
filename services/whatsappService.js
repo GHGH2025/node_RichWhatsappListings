@@ -11,9 +11,11 @@ import fs from "fs";
 import {
   isTrackedParticipant,
   getTrackedGroupName,
+  getTrackedParticipantEmail,
 } from "./trackConfigCache.js";
 import { WhatsappTrackedMessages } from "../models/whatsapp_tracked_messages.js";
 import { phoneFromJid } from "../utils/phone.js";
+import { uploadBufferToS3 } from "../utils/s3Upload.js";
 
 const authDir = "./auth";
 fs.mkdirSync(authDir, { recursive: true });
@@ -126,7 +128,35 @@ function resolveSenderPhone(m) {
   return "";
 }
 
-async function persistTrackedMessage(m, { jid, text, type }) {
+async function downloadImageToS3(m) {
+  const imageMeta = m?.message?.imageMessage;
+  if (!imageMeta) return null;
+
+  try {
+    const buffer = await downloadMediaMessage(
+      m,
+      "buffer",
+      {},
+      {
+        logger: sock?.logger,
+        reuploadRequest: sock?.updateMediaMessage?.bind(sock),
+      }
+    );
+    if (!buffer) return null;
+
+    const mimetype = imageMeta.mimetype || "image/jpeg";
+    const url = await uploadBufferToS3(Buffer.from(buffer), { mimetype });
+    if (url) {
+      console.log(`🖼️ Uploaded WhatsApp image → ${url}`);
+    }
+    return url;
+  } catch (err) {
+    console.error("Media download/upload error:", err.message || err);
+    return null;
+  }
+}
+
+async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
   const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
   if (!isGroup) return;
 
@@ -137,9 +167,14 @@ async function persistTrackedMessage(m, { jid, text, type }) {
   if (!messageId) return;
 
   const senderPhone = resolveSenderPhone(m) || "unknown";
+  const senderEmail = getTrackedParticipantEmail(jid, senderJid);
   const tsSeconds = m.messageTimestamp
     ? Number(m.messageTimestamp)
     : Math.floor(Date.now() / 1000);
+
+  const urls = (mediaUrls || []).filter(
+    (u) => typeof u === "string" && /^https?:\/\//i.test(u)
+  );
 
   try {
     await WhatsappTrackedMessages.updateOne(
@@ -149,11 +184,14 @@ async function persistTrackedMessage(m, { jid, text, type }) {
           group_jid: jid,
           group_name: getTrackedGroupName(jid),
           sender_phone: senderPhone,
+          sender_email: senderEmail,
           sender_jid: senderJid,
           message_id: messageId,
           type,
           text: text || "",
+          media_urls: urls,
           timestamp: new Date(tsSeconds * 1000),
+          status: "pending",
           raw: {
             fromMe: Boolean(m.key.fromMe),
             pushName: m.pushName || "",
@@ -162,7 +200,9 @@ async function persistTrackedMessage(m, { jid, text, type }) {
       },
       { upsert: true }
     );
-    console.log(`💾 Tracked [${jid}] ${senderJid}: (${type}) ${text}`);
+    console.log(
+      `💾 Tracked [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
+    );
   } catch (err) {
     console.error("❌ Failed to persist tracked message:", err.message || err);
   }
@@ -227,15 +267,17 @@ export async function startSock() {
 
       const jid = m.key.remoteJid;
       const { msgTypeKey, text, type } = extractMessageContent(m);
-      let filePath = null;
+      const mediaUrls = [];
 
-      // Media download (buffer only; file save remains disabled)
-      if (["imageMessage", "videoMessage", "documentMessage", "audioMessage"].includes(msgTypeKey)) {
-        try {
-          await downloadMediaMessage(m, "buffer", {}, { logger: sock.logger });
-        } catch (err) {
-          console.error("Media download error:", err);
-        }
+      const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
+      const senderJid = m.key?.participant || "";
+      const shouldTrack =
+        isGroup && senderJid && isTrackedParticipant(jid, senderJid);
+
+      // Download images immediately (Baileys media keys expire) and mirror to S3
+      if (shouldTrack && msgTypeKey === "imageMessage") {
+        const url = await downloadImageToS3(m);
+        if (url) mediaUrls.push(url);
       }
 
       const entry = {
@@ -243,14 +285,16 @@ export async function startSock() {
         jid,
         text,
         type,
-        filePath,
-        timestamp: Date.now()
+        mediaUrls,
+        timestamp: Date.now(),
       };
 
       addMessage(entry);
-      console.log(`📥 [${jid}] (${type}) ${text}`);
+      console.log(`📥 [${jid}] (${type}) media=${mediaUrls.length} ${text}`);
 
-      await persistTrackedMessage(m, { jid, text, type });
+      if (shouldTrack) {
+        await persistTrackedMessage(m, { jid, text, type, mediaUrls });
+      }
     }
   });
 }

@@ -2,6 +2,8 @@ import NodeCache from "node-cache";
 import { WhatsappGroupTrackConfigs } from "../models/whatsapp_group_track_configs.js";
 
 const CACHE_KEY = "active_track_configs";
+const EMAILS_KEY = "participant_emails";
+const NAMES_KEY = "group_names";
 
 /** stdTTL: 0 = never expire; we refresh on CRUD + startup */
 const cache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
@@ -31,17 +33,46 @@ function buildLookupMap(configs) {
   return map;
 }
 
+/**
+ * Build Map: group_jid → Map(participantJid → email)
+ */
+function buildEmailMap(configs) {
+  const map = new Map();
+
+  for (const cfg of configs) {
+    if (!cfg?.active || !cfg.group_jid) continue;
+
+    const byParticipant = new Map();
+    for (const person of cfg.people || []) {
+      if (!person?.active) continue;
+      const participant = String(person.participant || "").trim();
+      const email = String(person.email || "").trim().toLowerCase();
+      if (participant && email) {
+        byParticipant.set(participant, email);
+      }
+    }
+
+    if (byParticipant.size > 0) {
+      map.set(cfg.group_jid, byParticipant);
+    }
+  }
+
+  return map;
+}
+
 export async function loadTrackConfigCache() {
   const configs = await WhatsappGroupTrackConfigs.find({ active: true }).lean();
   const map = buildLookupMap(configs);
   cache.set(CACHE_KEY, map);
 
-  // Also keep group_name lookup for persist path
+  const emails = buildEmailMap(configs);
+  cache.set(EMAILS_KEY, emails);
+
   const names = new Map();
   for (const cfg of configs) {
     if (cfg?.group_jid) names.set(cfg.group_jid, cfg.group_name || "");
   }
-  cache.set("group_names", names);
+  cache.set(NAMES_KEY, names);
 
   console.log(`📦 Track config cache loaded (${map.size} active groups)`);
   return map;
@@ -65,6 +96,15 @@ export function isTrackedParticipant(groupJid, participantJid) {
 }
 
 export function getTrackedGroupName(groupJid) {
-  const names = cache.get("group_names") || new Map();
+  const names = cache.get(NAMES_KEY) || new Map();
   return names.get(groupJid) || "";
+}
+
+/** Configured seller email for a tracked participant (lowercase), or "". */
+export function getTrackedParticipantEmail(groupJid, participantJid) {
+  if (!groupJid || !participantJid) return "";
+  const emails = cache.get(EMAILS_KEY) || new Map();
+  const byParticipant = emails.get(groupJid);
+  if (!byParticipant) return "";
+  return byParticipant.get(String(participantJid).trim()) || "";
 }

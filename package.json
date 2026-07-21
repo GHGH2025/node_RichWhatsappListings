@@ -6,6 +6,7 @@
     "start": "node --use-system-ca server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1091.0",
     "@whiskeysockets/baileys": "^7.0.0-rc.3",
     "body-parser": "^2.2.0",
     "cors": "^2.8.6",

@@ -4,6 +4,7 @@ const personSchema = new mongoose.Schema(
   {
     phone: { type: String, required: true },
     name: { type: String, default: "" },
+    email: { type: String, default: "" },
     active: { type: Boolean, default: true },
     participant: { type: String, default: "" },
   },
