@@ -9,11 +9,13 @@ import makeWASocket, {
 import QRCode from "qrcode";
 import fs from "fs";
 import {
-  isTrackedSender,
+  isTrackedParticipant,
   getTrackedGroupName,
+  getTrackedParticipantEmail,
 } from "./trackConfigCache.js";
-import { TrackedMessage } from "../models/trackedMessage.js";
+import { WhatsappTrackedMessages } from "../models/whatsapp_tracked_messages.js";
 import { phoneFromJid } from "../utils/phone.js";
+import { uploadBufferToS3 } from "../utils/s3Upload.js";
 
 const authDir = "./auth";
 fs.mkdirSync(authDir, { recursive: true });
@@ -106,34 +108,90 @@ function extractMessageContent(m) {
   return { msgTypeKey, text, type };
 }
 
-async function persistTrackedMessage(m, { jid, text, type }) {
+/** Best-effort phone digits for storage (match uses participant JID, not phone). */
+function resolveSenderPhone(m) {
+  const senderJid = m.key?.participant || "";
+  const altJid = m.key?.participantAlt || "";
+
+  // participantAlt is PN JID, often with device suffix: 9186...:20@s.whatsapp.net
+  if (altJid) {
+    const local = String(altJid).split("@")[0] || "";
+    const phone = phoneFromJid(local.split(":")[0]);
+    if (phone) return phone;
+  }
+
+  if (String(senderJid).endsWith("@s.whatsapp.net")) {
+    const local = String(senderJid).split("@")[0] || "";
+    return phoneFromJid(local.split(":")[0]);
+  }
+
+  return "";
+}
+
+async function downloadImageToS3(m) {
+  const imageMeta = m?.message?.imageMessage;
+  if (!imageMeta) return null;
+
+  try {
+    const buffer = await downloadMediaMessage(
+      m,
+      "buffer",
+      {},
+      {
+        logger: sock?.logger,
+        reuploadRequest: sock?.updateMediaMessage?.bind(sock),
+      }
+    );
+    if (!buffer) return null;
+
+    const mimetype = imageMeta.mimetype || "image/jpeg";
+    const url = await uploadBufferToS3(Buffer.from(buffer), { mimetype });
+    if (url) {
+      console.log(`🖼️ Uploaded WhatsApp image → ${url}`);
+    }
+    return url;
+  } catch (err) {
+    console.error("Media download/upload error:", err.message || err);
+    return null;
+  }
+}
+
+async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
   const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
   if (!isGroup) return;
 
-  const senderJid = m.key.participant || "";
-  const senderPhone = phoneFromJid(senderJid);
-  if (!senderPhone || !isTrackedSender(jid, senderPhone)) return;
+  const senderJid = m.key?.participant || "";
+  if (!senderJid || !isTrackedParticipant(jid, senderJid)) return;
 
   const messageId = m.key.id || "";
   if (!messageId) return;
 
+  const senderPhone = resolveSenderPhone(m) || "unknown";
+  const senderEmail = getTrackedParticipantEmail(jid, senderJid);
   const tsSeconds = m.messageTimestamp
     ? Number(m.messageTimestamp)
     : Math.floor(Date.now() / 1000);
 
+  const urls = (mediaUrls || []).filter(
+    (u) => typeof u === "string" && /^https?:\/\//i.test(u)
+  );
+
   try {
-    await TrackedMessage.updateOne(
+    await WhatsappTrackedMessages.updateOne(
       { group_jid: jid, message_id: messageId },
       {
         $setOnInsert: {
           group_jid: jid,
           group_name: getTrackedGroupName(jid),
           sender_phone: senderPhone,
+          sender_email: senderEmail,
           sender_jid: senderJid,
           message_id: messageId,
           type,
           text: text || "",
+          media_urls: urls,
           timestamp: new Date(tsSeconds * 1000),
+          status: "pending",
           raw: {
             fromMe: Boolean(m.key.fromMe),
             pushName: m.pushName || "",
@@ -142,7 +200,9 @@ async function persistTrackedMessage(m, { jid, text, type }) {
       },
       { upsert: true }
     );
-    console.log(`💾 Tracked [${jid}] ${senderPhone}: (${type}) ${text}`);
+    console.log(
+      `💾 Tracked [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
+    );
   } catch (err) {
     console.error("❌ Failed to persist tracked message:", err.message || err);
   }
@@ -156,7 +216,8 @@ export async function startSock() {
     auth: state,
     version,
     browser: ["Chrome", "Windows", "10"],
-    printQRInTerminal: false
+    printQRInTerminal: false,
+    qrTimeout: 600_000, // 10 min — keep each QR before regenerating
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -200,36 +261,41 @@ export async function startSock() {
     // Prefer live notifies; still accept missing type for older Baileys behavior
     if (upsertType && upsertType !== "notify") return;
 
-    const m = messages[0];
-    if (!m?.message) return;
-    if (m.key?.fromMe) return;
+    for (const m of messages || []) {
+      if (!m?.message) continue;
+      if (m.key?.fromMe) continue;
 
-    const jid = m.key.remoteJid;
-    const { msgTypeKey, text, type } = extractMessageContent(m);
-    let filePath = null;
+      const jid = m.key.remoteJid;
+      const { msgTypeKey, text, type } = extractMessageContent(m);
+      const mediaUrls = [];
 
-    // Media download (buffer only; file save remains disabled)
-    if (["imageMessage", "videoMessage", "documentMessage", "audioMessage"].includes(msgTypeKey)) {
-      try {
-        await downloadMediaMessage(m, "buffer", {}, { logger: sock.logger });
-      } catch (err) {
-        console.error("Media download error:", err);
+      const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
+      const senderJid = m.key?.participant || "";
+      const shouldTrack =
+        isGroup && senderJid && isTrackedParticipant(jid, senderJid);
+
+      // Download images immediately (Baileys media keys expire) and mirror to S3
+      if (shouldTrack && msgTypeKey === "imageMessage") {
+        const url = await downloadImageToS3(m);
+        if (url) mediaUrls.push(url);
+      }
+
+      const entry = {
+        id: nextId++,
+        jid,
+        text,
+        type,
+        mediaUrls,
+        timestamp: Date.now(),
+      };
+
+      addMessage(entry);
+      console.log(`📥 [${jid}] (${type}) media=${mediaUrls.length} ${text}`);
+
+      if (shouldTrack) {
+        await persistTrackedMessage(m, { jid, text, type, mediaUrls });
       }
     }
-
-    const entry = {
-      id: nextId++,
-      jid,
-      text,
-      type,
-      filePath,
-      timestamp: Date.now()
-    };
-
-    addMessage(entry);
-    console.log(`📥 [${jid}] (${type}) ${text}`);
-
-    await persistTrackedMessage(m, { jid, text, type });
   });
 }
 
