@@ -4,7 +4,9 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
-  downloadMediaMessage
+  downloadMediaMessage,
+  extractMessageContent as baileysExtractMessageContent,
+  getContentType,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import fs from "fs";
@@ -76,36 +78,47 @@ export function addMessage(msg) {
 }
 
 function extractMessageContent(m) {
-  const msgTypeKey = Object.keys(m.message)[0];
+  // Baileys unwraps ephemeral/view-once/etc and skips senderKeyDistributionMessage
+  const content = baileysExtractMessageContent(m.message) || null;
+  const msgTypeKey = getContentType(content) || "";
   let text = "";
   let type = "";
 
+  if (!msgTypeKey || !content) {
+    return { msgTypeKey: "", text: "", type: "", content: null };
+  }
+
   if (msgTypeKey === "conversation") {
-    text = m.message.conversation;
+    text = content.conversation || "";
     type = "text";
   } else if (msgTypeKey === "extendedTextMessage") {
-    text = m.message.extendedTextMessage.text;
+    text = content.extendedTextMessage?.text || "";
     type = "extendedText";
   } else if (msgTypeKey === "imageMessage") {
-    text = m.message.imageMessage.caption || "";
+    text = content.imageMessage?.caption || "";
     type = "image";
   } else if (msgTypeKey === "videoMessage") {
-    text = m.message.videoMessage.caption || "";
+    text = content.videoMessage?.caption || "";
     type = "video";
   } else if (msgTypeKey === "audioMessage") {
     text = "";
     type = "audio";
   } else if (msgTypeKey === "documentMessage") {
-    text = m.message.documentMessage.fileName || "";
+    text = content.documentMessage?.fileName || "";
     type = "document";
   } else if (msgTypeKey === "reactionMessage") {
-    text = m.message.reactionMessage?.text || "";
+    text = content.reactionMessage?.text || "";
     type = "reaction";
   } else {
+    // Protocol / non-user types (protocolMessage, …)
     type = msgTypeKey;
   }
 
-  return { msgTypeKey, text, type };
+  return { msgTypeKey, text: String(text || ""), type, content };
+}
+
+function hasPersistableContent(text, mediaUrls = []) {
+  return Boolean((text || "").trim() || (mediaUrls || []).length);
 }
 
 /** Best-effort phone digits for storage (match uses participant JID, not phone). */
@@ -128,13 +141,20 @@ function resolveSenderPhone(m) {
   return "";
 }
 
-async function downloadImageToS3(m) {
-  const imageMeta = m?.message?.imageMessage;
+async function downloadImageToS3(m, content = null) {
+  const unwrapped =
+    content || baileysExtractMessageContent(m?.message) || null;
+  const imageMeta = unwrapped?.imageMessage;
   if (!imageMeta) return null;
+
+  // Prefer original message when image is top-level; else pass unwrapped content
+  const downloadMsg = m?.message?.imageMessage
+    ? m
+    : { ...m, message: unwrapped };
 
   try {
     const buffer = await downloadMediaMessage(
-      m,
+      downloadMsg,
       "buffer",
       {},
       {
@@ -162,6 +182,8 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
 
   const senderJid = m.key?.participant || "";
   if (!senderJid || !isTrackedParticipant(jid, senderJid)) return;
+
+  if (!hasPersistableContent(text, mediaUrls)) return;
 
   const messageId = m.key.id || "";
   if (!messageId) return;
@@ -266,7 +288,7 @@ export async function startSock() {
       if (m.key?.fromMe) continue;
 
       const jid = m.key.remoteJid;
-      const { msgTypeKey, text, type } = extractMessageContent(m);
+      const { msgTypeKey, text, type, content } = extractMessageContent(m);
       const mediaUrls = [];
 
       const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
@@ -276,8 +298,16 @@ export async function startSock() {
 
       // Download images immediately (Baileys media keys expire) and mirror to S3
       if (shouldTrack && msgTypeKey === "imageMessage") {
-        const url = await downloadImageToS3(m);
+        const url = await downloadImageToS3(m, content);
         if (url) mediaUrls.push(url);
+      }
+
+      // Protocol noise (e.g. senderKeyDistributionMessage) has no user content
+      if (shouldTrack && !hasPersistableContent(text, mediaUrls)) {
+        console.log(
+          `⏭️ Skip empty tracked msg [${jid}] type=${type || msgTypeKey || "unknown"}`
+        );
+        continue;
       }
 
       const entry = {
