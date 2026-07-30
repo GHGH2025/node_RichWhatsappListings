@@ -199,7 +199,7 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
   );
 
   try {
-    await WhatsappTrackedMessages.updateOne(
+    const result = await WhatsappTrackedMessages.updateOne(
       { group_jid: jid, message_id: messageId },
       {
         $setOnInsert: {
@@ -222,11 +222,80 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
       },
       { upsert: true }
     );
-    console.log(
-      `💾 Tracked [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
-    );
+    if (result.upsertedCount > 0) {
+      console.log(
+        `💾 Tracked [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
+      );
+    }
   } catch (err) {
     console.error("❌ Failed to persist tracked message:", err.message || err);
+  }
+}
+
+/**
+ * Process one inbound WA message for tracking.
+ * @param {"notify"|"append"|"history"} source
+ *   - notify: live delivery (also fills in-memory buffer for GET /messages)
+ *   - append: offline/reconnect catch-up (tracked only)
+ *   - history: messaging-history.set sync (tracked only)
+ */
+async function processInboundMessage(m, source = "notify") {
+  if (!m?.message) return;
+  if (m.key?.fromMe) return;
+
+  const jid = m.key.remoteJid;
+  const { msgTypeKey, text, type, content } = extractMessageContent(m);
+  const mediaUrls = [];
+
+  const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
+  const senderJid = m.key?.participant || "";
+  const shouldTrack =
+    isGroup && senderJid && isTrackedParticipant(jid, senderJid);
+
+  // Reconnect/history dumps can be huge — only care about tracked sellers
+  const isLive = source === "notify";
+  if (!isLive && !shouldTrack) return;
+
+  const messageId = m.key?.id || "";
+  if (shouldTrack && messageId && !isLive) {
+    const existing = await WhatsappTrackedMessages.exists({
+      group_jid: jid,
+      message_id: messageId,
+    });
+    if (existing) return;
+  }
+
+  // Download images immediately (Baileys media keys expire) and mirror to S3
+  if (shouldTrack && msgTypeKey === "imageMessage") {
+    const url = await downloadImageToS3(m, content);
+    if (url) mediaUrls.push(url);
+  }
+
+  if (shouldTrack && !hasPersistableContent(text, mediaUrls)) {
+    console.log(
+      `⏭️ Skip empty tracked msg [${source}] [${jid}] type=${type || msgTypeKey || "unknown"}`
+    );
+    return;
+  }
+
+  if (isLive) {
+    addMessage({
+      id: nextId++,
+      jid,
+      text,
+      type,
+      mediaUrls,
+      timestamp: Date.now(),
+    });
+    console.log(`📥 [${jid}] (${type}) media=${mediaUrls.length} ${text}`);
+  } else if (shouldTrack) {
+    console.log(
+      `📥 [${source}] [${jid}] (${type}) media=${mediaUrls.length} ${text}`
+    );
+  }
+
+  if (shouldTrack) {
+    await persistTrackedMessage(m, { jid, text, type, mediaUrls });
   }
 }
 
@@ -279,51 +348,40 @@ export async function startSock() {
     }
   });
 
+  // notify = live; append = offline/reconnect catch-up (same persist path)
   sock.ev.on("messages.upsert", async ({ messages, type: upsertType }) => {
-    // Prefer live notifies; still accept missing type for older Baileys behavior
-    if (upsertType && upsertType !== "notify") return;
-
+    const source = upsertType === "append" ? "append" : "notify";
     for (const m of messages || []) {
-      if (!m?.message) continue;
-      if (m.key?.fromMe) continue;
-
-      const jid = m.key.remoteJid;
-      const { msgTypeKey, text, type, content } = extractMessageContent(m);
-      const mediaUrls = [];
-
-      const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
-      const senderJid = m.key?.participant || "";
-      const shouldTrack =
-        isGroup && senderJid && isTrackedParticipant(jid, senderJid);
-
-      // Download images immediately (Baileys media keys expire) and mirror to S3
-      if (shouldTrack && msgTypeKey === "imageMessage") {
-        const url = await downloadImageToS3(m, content);
-        if (url) mediaUrls.push(url);
-      }
-
-      // Protocol noise (e.g. senderKeyDistributionMessage) has no user content
-      if (shouldTrack && !hasPersistableContent(text, mediaUrls)) {
-        console.log(
-          `⏭️ Skip empty tracked msg [${jid}] type=${type || msgTypeKey || "unknown"}`
+      try {
+        await processInboundMessage(m, source);
+      } catch (err) {
+        console.error(
+          `❌ Failed processing inbound msg [${source}]:`,
+          err.message || err
         );
-        continue;
       }
+    }
+  });
 
-      const entry = {
-        id: nextId++,
-        jid,
-        text,
-        type,
-        mediaUrls,
-        timestamp: Date.now(),
-      };
+  // History sync batches (when WA sends them). Deduped by message_id in Mongo.
+  sock.ev.on("messaging-history.set", async ({ messages, isLatest, syncType }) => {
+    const batch = messages || [];
+    if (!batch.length) return;
 
-      addMessage(entry);
-      console.log(`📥 [${jid}] (${type}) media=${mediaUrls.length} ${text}`);
+    console.log(
+      `📚 History sync batch: ${batch.length} msgs` +
+        (isLatest != null ? ` isLatest=${isLatest}` : "") +
+        (syncType != null ? ` syncType=${syncType}` : "")
+    );
 
-      if (shouldTrack) {
-        await persistTrackedMessage(m, { jid, text, type, mediaUrls });
+    for (const m of batch) {
+      try {
+        await processInboundMessage(m, "history");
+      } catch (err) {
+        console.error(
+          "❌ Failed processing history msg:",
+          err.message || err
+        );
       }
     }
   });
