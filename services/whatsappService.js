@@ -309,6 +309,7 @@ export async function startSock() {
     browser: ["Chrome", "Windows", "10"],
     printQRInTerminal: false,
     qrTimeout: 600_000, // 10 min — keep each QR before regenerating
+    syncFullHistory: true, // emit messaging-history.set for catch-up
   });
 
   sock.ev.on("creds.update", saveCreds);
