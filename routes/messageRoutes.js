@@ -1,9 +1,7 @@
 // routes/messageRoutes.js
 import express from "express";
 import { getSock, getMessages, addMessage, findGroupJidByName } from "../services/whatsappService.js";
-import { createRequire } from 'module';
 
-const require = createRequire(import.meta.url);
 
 const router = express.Router();
 
