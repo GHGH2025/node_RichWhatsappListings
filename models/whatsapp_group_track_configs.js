@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ensureDirectWholesalersFromPeople } from "./direct_wholesaler.js";
 
 const personSchema = new mongoose.Schema(
   {
@@ -23,6 +24,24 @@ const whatsappGroupTrackConfigsSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+async function syncDirectWholesalers(doc) {
+  if (!doc) return;
+  try {
+    await ensureDirectWholesalersFromPeople(doc.people);
+  } catch (err) {
+    console.error("syncDirectWholesalers error:", err);
+  }
+}
+
+whatsappGroupTrackConfigsSchema.post("save", async function (doc) {
+  await syncDirectWholesalers(doc);
+});
+
+// PUT /track-configs uses findByIdAndUpdate, which does not run save hooks.
+whatsappGroupTrackConfigsSchema.post("findOneAndUpdate", async function (doc) {
+  await syncDirectWholesalers(doc);
+});
 
 export const WhatsappGroupTrackConfigs =
   mongoose.models.WhatsappGroupTrackConfigs ||
