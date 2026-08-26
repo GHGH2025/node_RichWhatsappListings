@@ -9,11 +9,13 @@ import makeWASocket, {
   getContentType,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
+import cron from "node-cron";
 import fs from "fs";
 import {
   isTrackedParticipant,
   getTrackedGroupName,
   getTrackedParticipantEmail,
+  getTrackedGroupJids,
 } from "./trackConfigCache.js";
 import { WhatsappTrackedMessages } from "../models/whatsapp_tracked_messages.js";
 import { phoneFromJid } from "../utils/phone.js";
@@ -25,6 +27,16 @@ fs.mkdirSync(authDir, { recursive: true });
 let sock;
 const msgs = [];
 let nextId = 1;
+
+const JOB_CRON = "*/5 * * * *";
+const JOB_HISTORY_COUNT = 50;
+const JOB_HISTORY_WAIT_MS = 90_000;
+/** group_jid → { key, timestampMs } newest inbound we have seen */
+const lastGroupMsgAnchor = new Map();
+/** groups whose in-flight history fetch was started by the 5-min job */
+const jobRescanGroups = new Set();
+let jobTask = null;
+let jobRunning = false;
 
 const WEBHOOK_URL = process.env.WHATSAPP_STATUS_WEBHOOK_URL || "";
 const APP_BASE_URL = process.env.APP_BASE_URL || "http://localhost:3001";
@@ -176,7 +188,113 @@ async function downloadImageToS3(m, content = null) {
   }
 }
 
-async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
+function toTimestampMs(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return Date.now();
+  return n < 1e12 ? n * 1000 : n;
+}
+
+function rememberGroupMsgAnchor(m) {
+  const jid = m?.key?.remoteJid;
+  if (typeof jid !== "string" || !jid.endsWith("@g.us") || !m?.key?.id) return;
+
+  const timestampMs = toTimestampMs(m.messageTimestamp);
+  const prev = lastGroupMsgAnchor.get(jid);
+  if (prev && prev.timestampMs >= timestampMs) return;
+
+  lastGroupMsgAnchor.set(jid, {
+    key: {
+      remoteJid: jid,
+      id: m.key.id,
+      fromMe: Boolean(m.key.fromMe),
+      participant: m.key.participant,
+    },
+    timestampMs,
+  });
+}
+
+async function resolveHistoryAnchor(groupJid) {
+  const live = lastGroupMsgAnchor.get(groupJid);
+  if (live?.key?.id) return live;
+
+  const newest = await WhatsappTrackedMessages.findOne({ group_jid: groupJid })
+    .sort({ timestamp: -1 })
+    .lean();
+  if (!newest?.message_id) return null;
+
+  const ts = newest.timestamp ? new Date(newest.timestamp).getTime() : Date.now();
+  return {
+    key: {
+      remoteJid: groupJid,
+      id: newest.message_id,
+      fromMe: Boolean(newest.raw?.fromMe),
+    },
+    timestampMs: Number.isFinite(ts) ? ts : Date.now(),
+  };
+}
+
+async function runTrackedMessageSyncJob() {
+  if (jobRunning) {
+    console.log("⏭️ Sync job still running, skip");
+    return;
+  }
+  if (!sock?.user) {
+    console.log("⏭️ Sync job: socket not ready");
+    return;
+  }
+
+  const groupJids = getTrackedGroupJids();
+  if (!groupJids.length) {
+    console.log("⏭️ Sync job: no tracked groups in config");
+    return;
+  }
+
+  jobRunning = true;
+  console.log(`⏱️ Sync job: fetching history for ${groupJids.length} tracked group(s)`);
+
+  try {
+    for (const groupJid of groupJids) {
+      const anchor = await resolveHistoryAnchor(groupJid);
+      if (!anchor) {
+        console.log(`⏭️ Sync job: no anchor yet for ${groupJid}`);
+        continue;
+      }
+
+      jobRescanGroups.add(groupJid);
+      try {
+        await sock.fetchMessageHistory(
+          JOB_HISTORY_COUNT,
+          anchor.key,
+          anchor.timestampMs
+        );
+        console.log(`📚 Sync job requested history [${groupJid}] count=${JOB_HISTORY_COUNT}`);
+      } catch (err) {
+        jobRescanGroups.delete(groupJid);
+        console.error(
+          `❌ Sync job fetch failed [${groupJid}]:`,
+          err.message || err
+        );
+      }
+    }
+  } finally {
+    setTimeout(() => {
+      jobRescanGroups.clear();
+      jobRunning = false;
+    }, JOB_HISTORY_WAIT_MS);
+  }
+}
+
+function startTrackedMessageSyncJob() {
+  if (jobTask) return;
+  jobTask = cron.schedule(JOB_CRON, () => {
+    runTrackedMessageSyncJob().catch((err) => {
+      console.error("❌ Sync job crashed:", err.message || err);
+    });
+  });
+  console.log("⏱️ Tracked-message sync job scheduled every 5 min (node-cron)");
+}
+
+async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [], job = false }) {
   const isGroup = typeof jid === "string" && jid.endsWith("@g.us");
   if (!isGroup) return;
 
@@ -214,6 +332,7 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
           media_urls: urls,
           timestamp: new Date(tsSeconds * 1000),
           status: "pending",
+          job: Boolean(job),
           raw: {
             fromMe: Boolean(m.key.fromMe),
             pushName: m.pushName || "",
@@ -224,7 +343,7 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
     );
     if (result.upsertedCount > 0) {
       console.log(
-        `💾 Tracked [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
+        `💾 Tracked${job ? " [job]" : ""} [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
       );
     }
   } catch (err) {
@@ -239,7 +358,7 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [] }) {
  *   - append: offline/reconnect catch-up (tracked only)
  *   - history: messaging-history.set sync (tracked only)
  */
-async function processInboundMessage(m, source = "notify") {
+async function processInboundMessage(m, source = "notify", { job = false } = {}) {
   if (!m?.message) return;
   if (m.key?.fromMe) return;
 
@@ -295,7 +414,7 @@ async function processInboundMessage(m, source = "notify") {
   }
 
   if (shouldTrack) {
-    await persistTrackedMessage(m, { jid, text, type, mediaUrls });
+    await persistTrackedMessage(m, { jid, text, type, mediaUrls, job });
   }
 }
 
@@ -321,6 +440,7 @@ export async function startSock() {
     }
     if (connection === "open") {
       console.log("✅ WhatsApp connected");
+      startTrackedMessageSyncJob();
       await notifyStatusWebhook("connected", {
         message: "WhatsApp session is connected"
       });
@@ -353,6 +473,7 @@ export async function startSock() {
   sock.ev.on("messages.upsert", async ({ messages, type: upsertType }) => {
     const source = upsertType === "append" ? "append" : "notify";
     for (const m of messages || []) {
+      rememberGroupMsgAnchor(m);
       try {
         await processInboundMessage(m, source);
       } catch (err) {
@@ -376,8 +497,10 @@ export async function startSock() {
     );
 
     for (const m of batch) {
+      const jid = m?.key?.remoteJid;
+      const job = typeof jid === "string" && jobRescanGroups.has(jid);
       try {
-        await processInboundMessage(m, "history");
+        await processInboundMessage(m, "history", { job });
       } catch (err) {
         console.error(
           "❌ Failed processing history msg:",

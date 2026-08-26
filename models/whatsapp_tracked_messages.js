@@ -15,6 +15,8 @@ const whatsappTrackedMessagesSchema = new mongoose.Schema(
     raw: { type: mongoose.Schema.Types.Mixed, default: null },
     status: { type: String, enum: ["pending", "processing", "processed", "error"], default: "pending" },
     errorMessage: { type: String, default: "" },
+    /** true = inserted by the 5-min history job (socket missed it) */
+    job: { type: Boolean, default: false },
   },
   { collection: "whatsapp_tracked_messages" }
 );
