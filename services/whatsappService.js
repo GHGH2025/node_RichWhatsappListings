@@ -18,6 +18,7 @@ import {
   getTrackedGroupJids,
 } from "./trackConfigCache.js";
 import { WhatsappTrackedMessages } from "../models/whatsapp_tracked_messages.js";
+import { WhatsappTrackJobRun } from "../models/whatsapp_track_job_runs.js";
 import { phoneFromJid } from "../utils/phone.js";
 import { uploadBufferToS3 } from "../utils/s3Upload.js";
 
@@ -37,6 +38,8 @@ const lastGroupMsgAnchor = new Map();
 const jobRescanGroups = new Set();
 let jobTask = null;
 let jobRunning = false;
+/** In-flight 5-min job telemetry, filled while history upserts land. */
+let activeJobStats = null;
 
 const WEBHOOK_URL = process.env.WHATSAPP_STATUS_WEBHOOK_URL || "";
 const APP_BASE_URL = process.env.APP_BASE_URL || "http://localhost:3001";
@@ -233,30 +236,105 @@ async function resolveHistoryAnchor(groupJid) {
   };
 }
 
+function startJobStats(groupJids) {
+  const groups = new Map();
+  for (const groupJid of groupJids) {
+    groups.set(groupJid, {
+      group_jid: groupJid,
+      group_name: getTrackedGroupName(groupJid),
+      added: 0,
+      fetched: false,
+      error: "",
+    });
+  }
+  activeJobStats = {
+    run_at: new Date(),
+    added: 0,
+    groups_targeted: groupJids.length,
+    groups_fetched: 0,
+    groups,
+  };
+}
+
+function recordJobAdd(groupJid) {
+  if (!activeJobStats) return;
+  activeJobStats.added += 1;
+  const bucket = activeJobStats.groups.get(groupJid);
+  if (bucket) bucket.added += 1;
+}
+
+async function persistSkippedJobRun(reason, ok = true) {
+  try {
+    await WhatsappTrackJobRun.create({
+      run_at: new Date(),
+      ok,
+      skipped: true,
+      reason,
+      groups_targeted: 0,
+      groups_fetched: 0,
+      added: 0,
+      groups: [],
+    });
+    console.log(`📊 Sync job history skipped: ${reason}`);
+  } catch (err) {
+    console.error("❌ Failed to persist sync job history:", err.message || err);
+  }
+}
+
+async function persistJobHistory({ ok = true, reason = "" } = {}) {
+  const stats = activeJobStats;
+  activeJobStats = null;
+  const groups = stats ? [...stats.groups.values()] : [];
+  try {
+    await WhatsappTrackJobRun.create({
+      run_at: stats?.run_at || new Date(),
+      ok,
+      skipped: false,
+      reason,
+      groups_targeted: stats?.groups_targeted || 0,
+      groups_fetched: stats?.groups_fetched || 0,
+      added: stats?.added || 0,
+      groups,
+    });
+    console.log(
+      `📊 Sync job history: added=${stats?.added || 0} groups=${groups.length}` +
+        (reason ? ` reason=${reason}` : "")
+    );
+  } catch (err) {
+    console.error("❌ Failed to persist sync job history:", err.message || err);
+  }
+}
+
 async function runTrackedMessageSyncJob() {
   if (jobRunning) {
     console.log("⏭️ Sync job still running, skip");
+    await persistSkippedJobRun("still_running");
     return;
   }
   if (!sock?.user) {
     console.log("⏭️ Sync job: socket not ready");
+    await persistSkippedJobRun("socket_not_ready", false);
     return;
   }
 
   const groupJids = getTrackedGroupJids();
   if (!groupJids.length) {
     console.log("⏭️ Sync job: no tracked groups in config");
+    await persistSkippedJobRun("no_tracked_groups");
     return;
   }
 
   jobRunning = true;
+  startJobStats(groupJids);
   console.log(`⏱️ Sync job: fetching history for ${groupJids.length} tracked group(s)`);
 
   try {
     for (const groupJid of groupJids) {
+      const bucket = activeJobStats?.groups.get(groupJid);
       const anchor = await resolveHistoryAnchor(groupJid);
       if (!anchor) {
         console.log(`⏭️ Sync job: no anchor yet for ${groupJid}`);
+        if (bucket) bucket.error = "no_anchor";
         continue;
       }
 
@@ -267,9 +345,12 @@ async function runTrackedMessageSyncJob() {
           anchor.key,
           anchor.timestampMs
         );
+        if (bucket) bucket.fetched = true;
+        if (activeJobStats) activeJobStats.groups_fetched += 1;
         console.log(`📚 Sync job requested history [${groupJid}] count=${JOB_HISTORY_COUNT}`);
       } catch (err) {
         jobRescanGroups.delete(groupJid);
+        if (bucket) bucket.error = String(err.message || err);
         console.error(
           `❌ Sync job fetch failed [${groupJid}]:`,
           err.message || err
@@ -278,8 +359,15 @@ async function runTrackedMessageSyncJob() {
     }
   } finally {
     setTimeout(() => {
-      jobRescanGroups.clear();
-      jobRunning = false;
+      const hadError = [...(activeJobStats?.groups.values() || [])].some((g) => g.error);
+      void persistJobHistory({
+        ok: !hadError,
+        skipped: false,
+        reason: hadError ? "group_fetch_errors" : "",
+      }).finally(() => {
+        jobRescanGroups.clear();
+        jobRunning = false;
+      });
     }, JOB_HISTORY_WAIT_MS);
   }
 }
@@ -342,6 +430,7 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [], job =
       { upsert: true }
     );
     if (result.upsertedCount > 0) {
+      if (job) recordJobAdd(jid);
       console.log(
         `💾 Tracked${job ? " [job]" : ""} [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
       );
