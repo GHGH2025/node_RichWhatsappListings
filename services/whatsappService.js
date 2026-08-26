@@ -468,6 +468,7 @@ function notifyHistoryWaiters(batch) {
   for (const m of batch || []) {
     const jid = m?.key?.remoteJid;
     if (typeof jid !== "string" || !jid.endsWith("@g.us")) continue;
+    if (!pendingHistoryWaits.has(jid)) continue;
     if (!byGroup.has(jid)) byGroup.set(jid, []);
     byGroup.get(jid).push(m);
   }
@@ -476,8 +477,14 @@ function notifyHistoryWaiters(batch) {
   }
 }
 
+/** `no_anchor` is expected until a group has any stored/live message. */
+function isHardGroupFetchError(error) {
+  return Boolean(error) && error !== "no_anchor";
+}
+
 async function fetchHistoryPage(groupJid, anchor) {
   const waiter = waitForGroupHistoryPage(groupJid);
+  console.log(`📚 Sync job requested history [${groupJid}] count=${JOB_HISTORY_COUNT}`);
   await sock.fetchMessageHistory(
     JOB_HISTORY_COUNT,
     anchor.key,
@@ -580,7 +587,9 @@ async function runTrackedMessageSyncJob() {
       await syncGroupHistory(groupJid);
     }
   } finally {
-    const hadError = [...(activeJobStats?.groups.values() || [])].some((g) => g.error);
+    const hadError = [...(activeJobStats?.groups.values() || [])].some((g) =>
+      isHardGroupFetchError(g.error)
+    );
     const noHistory =
       (activeJobStats?.groups_targeted || 0) > 0 &&
       (activeJobStats?.groups_fetched || 0) === 0;
@@ -882,6 +891,7 @@ export async function startSock() {
 
     // notify = live; append = offline/reconnect catch-up (same persist path)
     sock.ev.on("messages.upsert", async ({ messages, type: upsertType }) => {
+      notifyHistoryWaiters(messages);
       const source = upsertType === "append" ? "append" : "notify";
       for (const m of messages || []) {
         rememberGroupMsgAnchor(m);
@@ -899,13 +909,12 @@ export async function startSock() {
     // History sync batches (when WA sends them). Deduped by message_id in Mongo.
     sock.ev.on("messaging-history.set", async ({ messages, isLatest, syncType }) => {
       const batch = messages || [];
-      if (!batch.length) return;
-
       console.log(
         `📚 History sync batch: ${batch.length} msgs` +
           (isLatest != null ? ` isLatest=${isLatest}` : "") +
           (syncType != null ? ` syncType=${syncType}` : "")
       );
+      if (!batch.length) return;
 
       notifyHistoryWaiters(batch);
       await enqueueHistoryProcess(async () => {
