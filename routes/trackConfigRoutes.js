@@ -2,7 +2,7 @@ import express from "express";
 import { getSock } from "../services/whatsappService.js";
 import { WhatsappGroupTrackConfigs } from "../models/whatsapp_group_track_configs.js";
 import { WhatsappTrackedMessages } from "../models/whatsapp_tracked_messages.js";
-import { refreshTrackConfigCache } from "../services/trackConfigCache.js";
+import { refreshTrackConfigCache, normalizeParticipantJid } from "../services/trackConfigCache.js";
 import { normalizePhone, phoneFromJid } from "../utils/phone.js";
 
 const router = express.Router();
@@ -19,15 +19,27 @@ function normalizeEmail(value) {
 function normalizePeople(people) {
   if (!Array.isArray(people)) return [];
   return people
-    .map((p) => ({
-      phone: normalizePhone(p?.phone),
-      name: String(p?.name || "").trim(),
-      email: normalizeEmail(p?.email),
-      active: p?.active !== false,
-      // Accept either `participant` or participants API `jid`
-      participant: String(p?.participant || p?.jid || "").trim(),
-    }))
-    .filter((p) => p.phone);
+    .map((p) => {
+      const phone = normalizePhone(p?.phone);
+      const participant = normalizeParticipantJid(p?.participant || p?.jid);
+      let participant_lid = normalizeParticipantJid(p?.participant_lid || p?.lid);
+      let participant_pn = normalizeParticipantJid(p?.participant_pn || p?.phoneNumber);
+      if (!participant_lid && participant.endsWith("@lid")) participant_lid = participant;
+      if (!participant_pn && participant.endsWith("@s.whatsapp.net")) {
+        participant_pn = participant;
+      }
+      if (!participant_pn && phone) participant_pn = `${phone}@s.whatsapp.net`;
+      return {
+        phone,
+        name: String(p?.name || "").trim(),
+        email: normalizeEmail(p?.email),
+        active: p?.active !== false,
+        participant,
+        participant_lid,
+        participant_pn,
+      };
+    })
+    .filter((p) => p.phone || p.participant);
 }
 
 /** GET /groups — list joined WhatsApp groups */
@@ -62,11 +74,13 @@ router.get("/groups/:jid/participants", async (req, res) => {
     const participants = (meta.participants || []).map((p) => {
       // Prefer PN JID (phoneNumber); never treat @lid id digits as a phone
       const pnJid = p.phoneNumber || (String(p.id || "").endsWith("@s.whatsapp.net") ? p.id : "");
+      const lidJid = p.lid || (String(p.id || "").endsWith("@lid") ? p.id : "");
       return {
         jid: p.id,
+        lid: lidJid || "",
+        phoneNumber: pnJid || "",
         phone: phoneFromJid(pnJid),
         admin: p.admin || null,
-        
       };
     });
 

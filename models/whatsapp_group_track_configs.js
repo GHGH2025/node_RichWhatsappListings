@@ -3,11 +3,13 @@ import { ensureDirectWholesalersFromPeople } from "./direct_wholesaler.js";
 
 const personSchema = new mongoose.Schema(
   {
-    phone: { type: String, required: true },
+    phone: { type: String, default: "" },
     name: { type: String, default: "" },
     email: { type: String, default: "" },
     active: { type: Boolean, default: true },
     participant: { type: String, default: "" },
+    participant_lid: { type: String, default: "" },
+    participant_pn: { type: String, default: "" },
   },
   { _id: false }
 );
