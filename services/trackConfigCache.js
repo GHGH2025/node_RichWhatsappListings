@@ -135,11 +135,6 @@ export function getTrackedGroupName(groupJid) {
   return names.get(groupJid) || "";
 }
 
-/** Active tracked group JIDs from config cache. */
-export function getTrackedGroupJids() {
-  return [...getMap().keys()];
-}
-
 /** Configured seller email for a tracked participant (lowercase), or "". */
 export function getTrackedParticipantEmail(groupJid, participantJid, participantAlt) {
   if (!groupJid) return "";
