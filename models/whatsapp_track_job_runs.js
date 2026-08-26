@@ -8,7 +8,10 @@ const whatsappTrackJobRunSchema = new mongoose.Schema(
     reason: { type: String, default: "" },
     groups_targeted: { type: Number, default: 0 },
     groups_fetched: { type: Number, default: 0 },
+    seen: { type: Number, default: 0 },
     added: { type: Number, default: 0 },
+    already: { type: Number, default: 0 },
+    skipped_count: { type: Number, default: 0 },
     groups: { type: [mongoose.Schema.Types.Mixed], default: [] },
   },
   { collection: "whatsapp_track_job_runs" }

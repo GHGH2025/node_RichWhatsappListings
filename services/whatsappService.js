@@ -236,31 +236,52 @@ async function resolveHistoryAnchor(groupJid) {
   };
 }
 
+function emptyGroupBucket(groupJid) {
+  return {
+    group_jid: groupJid,
+    group_name: getTrackedGroupName(groupJid),
+    seen: 0,
+    added: 0,
+    already: 0,
+    skipped: 0,
+    fetched: false,
+    error: "",
+  };
+}
+
 function startJobStats(groupJids) {
   const groups = new Map();
   for (const groupJid of groupJids) {
-    groups.set(groupJid, {
-      group_jid: groupJid,
-      group_name: getTrackedGroupName(groupJid),
-      added: 0,
-      fetched: false,
-      error: "",
-    });
+    groups.set(groupJid, emptyGroupBucket(groupJid));
   }
   activeJobStats = {
     run_at: new Date(),
+    seen: 0,
     added: 0,
+    already: 0,
+    skipped: 0,
     groups_targeted: groupJids.length,
     groups_fetched: 0,
     groups,
   };
 }
 
-function recordJobAdd(groupJid) {
-  if (!activeJobStats) return;
-  activeJobStats.added += 1;
-  const bucket = activeJobStats.groups.get(groupJid);
-  if (bucket) bucket.added += 1;
+function groupBucket(groupJid) {
+  if (!activeJobStats || !groupJid) return null;
+  let bucket = activeJobStats.groups.get(groupJid);
+  if (!bucket) {
+    bucket = emptyGroupBucket(groupJid);
+    activeJobStats.groups.set(groupJid, bucket);
+  }
+  return bucket;
+}
+
+function recordJobEvent(groupJid, kind) {
+  const bucket = groupBucket(groupJid);
+  if (!bucket || !activeJobStats) return;
+  if (kind !== "seen" && kind !== "added" && kind !== "already" && kind !== "skipped") return;
+  bucket[kind] += 1;
+  activeJobStats[kind] += 1;
 }
 
 async function persistSkippedJobRun(reason, ok = true) {
@@ -272,7 +293,10 @@ async function persistSkippedJobRun(reason, ok = true) {
       reason,
       groups_targeted: 0,
       groups_fetched: 0,
+      seen: 0,
       added: 0,
+      already: 0,
+      skipped_count: 0,
       groups: [],
     });
     console.log(`📊 Sync job history skipped: ${reason}`);
@@ -284,7 +308,11 @@ async function persistSkippedJobRun(reason, ok = true) {
 async function persistJobHistory({ ok = true, reason = "" } = {}) {
   const stats = activeJobStats;
   activeJobStats = null;
-  const groups = stats ? [...stats.groups.values()] : [];
+  const groups = stats
+    ? [...stats.groups.values()].sort(
+        (a, b) => (b.added || 0) - (a.added || 0) || (b.seen || 0) - (a.seen || 0)
+      )
+    : [];
   try {
     await WhatsappTrackJobRun.create({
       run_at: stats?.run_at || new Date(),
@@ -293,11 +321,14 @@ async function persistJobHistory({ ok = true, reason = "" } = {}) {
       reason,
       groups_targeted: stats?.groups_targeted || 0,
       groups_fetched: stats?.groups_fetched || 0,
+      seen: stats?.seen || 0,
       added: stats?.added || 0,
+      already: stats?.already || 0,
+      skipped_count: stats?.skipped || 0,
       groups,
     });
     console.log(
-      `📊 Sync job history: added=${stats?.added || 0} groups=${groups.length}` +
+      `📊 Sync job history: added=${stats?.added || 0} already=${stats?.already || 0} seen=${stats?.seen || 0} groups=${groups.length}` +
         (reason ? ` reason=${reason}` : "")
     );
   } catch (err) {
@@ -430,10 +461,12 @@ async function persistTrackedMessage(m, { jid, text, type, mediaUrls = [], job =
       { upsert: true }
     );
     if (result.upsertedCount > 0) {
-      if (job) recordJobAdd(jid);
+      if (job) recordJobEvent(jid, "added");
       console.log(
         `💾 Tracked${job ? " [job]" : ""} [${jid}] ${senderJid}: (${type}) media=${urls.length} ${text}`
       );
+    } else if (job) {
+      recordJobEvent(jid, "already");
     }
   } catch (err) {
     console.error("❌ Failed to persist tracked message:", err.message || err);
@@ -462,7 +495,10 @@ async function processInboundMessage(m, source = "notify", { job = false } = {})
 
   // Reconnect/history dumps can be huge — only care about tracked sellers
   const isLive = source === "notify";
-  if (!isLive && !shouldTrack) return;
+  if (!isLive && !shouldTrack) {
+    if (job && isGroup) recordJobEvent(jid, "skipped");
+    return;
+  }
 
   const messageId = m.key?.id || "";
   if (shouldTrack && messageId && !isLive) {
@@ -470,7 +506,10 @@ async function processInboundMessage(m, source = "notify", { job = false } = {})
       group_jid: jid,
       message_id: messageId,
     });
-    if (existing) return;
+    if (existing) {
+      if (job) recordJobEvent(jid, "already");
+      return;
+    }
   }
 
   // Download images immediately (Baileys media keys expire) and mirror to S3
@@ -480,6 +519,7 @@ async function processInboundMessage(m, source = "notify", { job = false } = {})
   }
 
   if (shouldTrack && !hasPersistableContent(text, mediaUrls)) {
+    if (job) recordJobEvent(jid, "skipped");
     console.log(
       `⏭️ Skip empty tracked msg [${source}] [${jid}] type=${type || msgTypeKey || "unknown"}`
     );
@@ -588,6 +628,7 @@ export async function startSock() {
     for (const m of batch) {
       const jid = m?.key?.remoteJid;
       const job = typeof jid === "string" && jobRescanGroups.has(jid);
+      if (job && !m?.key?.fromMe) recordJobEvent(jid, "seen");
       try {
         await processInboundMessage(m, "history", { job });
       } catch (err) {
