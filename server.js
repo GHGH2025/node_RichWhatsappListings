@@ -7,6 +7,7 @@ import messageRoutes from "./routes/messageRoutes.js";
 import trackConfigRoutes from "./routes/trackConfigRoutes.js";
 import { connectMongo } from "./db/mongo.js";
 import { loadTrackConfigCache } from "./services/trackConfigCache.js";
+import { startDailyDigestJob } from "./jobs/dailyDigest.js";
 import morgan from "morgan";
 
 const PORT = 3001;
@@ -26,6 +27,7 @@ async function main() {
   app.listen(PORT, () => {
     console.log(`🌐 HTTP API running on http://localhost:${PORT}`);
     console.log(`📂 Public folder served at  http://localhost:${PORT}/public/qr.png`);
+    startDailyDigestJob();
   });
 }
 
