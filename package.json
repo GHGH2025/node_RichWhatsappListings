@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check:digest": "node jobs/dailyDigest.check.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1091.0",
