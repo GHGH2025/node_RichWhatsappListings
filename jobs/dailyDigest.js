@@ -31,23 +31,69 @@ export function msUntilNextDigest(now = new Date()) {
   return next.getTime() - now.getTime();
 }
 
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+export function formatDigestDate(date) {
+  const [dd, mm, yyyy] = String(date).split("-");
+  const monthIdx = Number(mm) - 1;
+  if (!dd || monthIdx < 0 || monthIdx > 11 || !yyyy) return date;
+  return `${dd} ${MONTHS[monthIdx]} ${yyyy}`;
+}
+
+const RULE_SUMMARIES = {
+  R1: "2-bed over $250k in tri-county",
+  R2: "2-bed over $150k rest of FL",
+  R3: "condo over $250k",
+  R4: "HOA over $600 under $150k",
+  R5: "land under 5k sqft",
+  R6: "3/1 over $375k in tri-county",
+  R7: "small 3/1 over $325k in tri-county",
+  R8: "frame/wood house",
+  R9: "under 900 sqft outside SFL",
+  R10: "mobile home only",
+};
+
+const SKIP_SUMMARIES = {
+  "price not low enough": "dup drop under 6%",
+  "35% quota": "rest of FL daily cap",
+  "35% quota cap": "rest of FL daily cap",
+  "Do not post city": "city blocked from posting",
+  "Do Not Post City": "city blocked from posting",
+  "bad region": "outside allowed regions",
+  "image failed": "image curation failed",
+};
+
+export function formatSkipLabel(label) {
+  const raw = String(label || "").trim();
+  const ruleId = raw.toUpperCase();
+  if (RULE_SUMMARIES[ruleId]) return `${ruleId} (${RULE_SUMMARIES[ruleId]})`;
+  if (SKIP_SUMMARIES[raw]) return `${raw} (${SKIP_SUMMARIES[raw]})`;
+  return raw;
+}
+
 export function formatDigestMessage({ date, counts, skip_counts, pageBase }) {
+  const skipTotal = skip_counts.reduce((sum, row) => sum + Number(row.n || 0), 0);
   const skipLines =
     skip_counts.length === 0
       ? "none"
-      : skip_counts.map((row) => `${row.label}: ${row.n}`).join("\n");
+      : skip_counts.map((row) => `• ${formatSkipLabel(row.label)}: ${row.n}`).join("\n");
+  const link = `${pageBase.replace(/\/$/, "")}/date/${date}`;
   return [
-    "Today's update",
+    `📊 Daily Summary — ${formatDigestDate(date)}`,
     "",
     `Posted: ${counts.posted}`,
     `WhatsApp: ${counts.whatsapp}`,
     `WordPress: ${counts.wordpress}`,
     `Podio: ${counts.podio}`,
     "",
-    "Skipped:",
+    `Skipped: ${skipTotal}`,
     skipLines,
     "",
-    `${pageBase.replace(/\/$/, "")}/date/${date}`,
+    "For complete details, please visit the link:",
+    link,
   ].join("\n");
 }
 
