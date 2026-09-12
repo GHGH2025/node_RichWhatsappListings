@@ -45,8 +45,8 @@ export function formatDigestDate(date) {
 
 const RULE_SUMMARIES = {
   R1: "2-bed over $250k in tri-county",
-  R2: "2-bed over $150k rest of FL",
-  R3: "condo over $250k",
+  R2: "2-bed over $179k rest of FL",
+  R3: "condo over $279k",
   R4: "HOA over $600 under $150k",
   R5: "land under 5k sqft",
   R6: "3/1 over $375k in tri-county",
