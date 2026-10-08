@@ -8,10 +8,16 @@ import {
 } from "./dailyDigest.js";
 
 assert.equal(yesterdayUtcDateParam(new Date("2026-09-09T03:30:00.000Z")), "08-09-2026");
-assert.equal(msUntilNextDigest(new Date("2026-09-09T03:29:00.000Z")), 60_000);
+// 6:00 PM America/New_York is 22:00 UTC while on EDT (UTC-4).
+assert.equal(msUntilNextDigest(new Date("2026-10-08T21:59:00.000Z")), 60_000);
 assert.equal(
-  msUntilNextDigest(new Date("2026-09-09T03:30:00.000Z")),
+  msUntilNextDigest(new Date("2026-10-08T22:00:00.000Z")),
   24 * 60 * 60 * 1000
+);
+// DST ends Nov 1 2026: 6:00 PM on Oct 31 (EDT) to 6:00 PM on Nov 1 (EST, UTC-5) is 25 hours.
+assert.equal(
+  msUntilNextDigest(new Date("2026-10-31T22:00:00.000Z")),
+  25 * 60 * 60 * 1000
 );
 
 const text = formatDigestMessage({
@@ -42,7 +48,7 @@ assert.equal(
     "",
     "Skipped: 25",
     "• price not low enough (dup drop under 6%): 18",
-    "• R3 (condo over $250k): 7",
+    "• R3 (condo over $279k): 7",
     "",
     "For complete details, please visit the link:",
     "https://deals.wholesaledealfinder.ai/date/08-09-2026",

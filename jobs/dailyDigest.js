@@ -1,5 +1,6 @@
-const DIGEST_UTC_HOUR = 3;
-const DIGEST_UTC_MINUTE = 30;
+const DIGEST_TIME_ZONE = "America/New_York";
+const DIGEST_LOCAL_HOUR = 18;
+const DIGEST_LOCAL_MINUTE = 0;
 const DEFAULT_DEAL_DETAILS_BASE = "https://deals.wholesaledealfinder.ai";
 
 export function pad2(value) {
@@ -13,22 +14,62 @@ export function yesterdayUtcDateParam(now = new Date()) {
   return `${pad2(yesterday.getUTCDate())}-${pad2(yesterday.getUTCMonth() + 1)}-${yesterday.getUTCFullYear()}`;
 }
 
+function zonedWallClockParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  }).formatToParts(date);
+  const get = (type) => Number(parts.find((p) => p.type === type).value);
+  return {
+    year: get("year"),
+    month: get("month") - 1,
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
+    second: get("second"),
+  };
+}
+
+// Offset (ms) between the wall clock in timeZone and UTC at the given instant.
+function zonedOffsetMs(date, timeZone) {
+  const p = zonedWallClockParts(date, timeZone);
+  const wallAsUtc = Date.UTC(p.year, p.month, p.day, p.hour, p.minute, p.second);
+  return wallAsUtc - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+// Convert a wall-clock time in timeZone to a UTC epoch ms, accounting for DST.
+function zonedTimeToUtc({ year, month, day }, hour, minute, timeZone) {
+  const guess = Date.UTC(year, month, day, hour, minute);
+  const firstOffset = zonedOffsetMs(new Date(guess), timeZone);
+  let result = guess - firstOffset;
+  const actualOffset = zonedOffsetMs(new Date(result), timeZone);
+  if (actualOffset !== firstOffset) result = guess - actualOffset;
+  return result;
+}
+
 export function msUntilNextDigest(now = new Date()) {
-  const next = new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      DIGEST_UTC_HOUR,
-      DIGEST_UTC_MINUTE,
-      0,
-      0
-    )
-  );
-  if (next.getTime() <= now.getTime()) {
-    next.setUTCDate(next.getUTCDate() + 1);
+  const today = zonedWallClockParts(now, DIGEST_TIME_ZONE);
+  let next = zonedTimeToUtc(today, DIGEST_LOCAL_HOUR, DIGEST_LOCAL_MINUTE, DIGEST_TIME_ZONE);
+  if (next <= now.getTime()) {
+    const tomorrow = new Date(Date.UTC(today.year, today.month, today.day + 1));
+    next = zonedTimeToUtc(
+      {
+        year: tomorrow.getUTCFullYear(),
+        month: tomorrow.getUTCMonth(),
+        day: tomorrow.getUTCDate(),
+      },
+      DIGEST_LOCAL_HOUR,
+      DIGEST_LOCAL_MINUTE,
+      DIGEST_TIME_ZONE
+    );
   }
-  return next.getTime() - now.getTime();
+  return next - now.getTime();
 }
 
 const MONTHS = [
@@ -147,7 +188,7 @@ export function startDailyDigestJob() {
 
   const arm = () => {
     const wait = msUntilNextDigest();
-    console.log(`📬 Daily digest armed; next fire in ${Math.round(wait / 60000)} min (03:30 UTC)`);
+    console.log(`📬 Daily digest armed; next fire in ${Math.round(wait / 60000)} min (6:00 PM ${DIGEST_TIME_ZONE})`);
     setTimeout(async () => {
       try {
         await runDailyDigest();
