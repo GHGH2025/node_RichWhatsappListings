@@ -95,6 +95,7 @@ const RULE_SUMMARIES = {
   R8: "frame/wood house",
   R9: "under 900 sqft outside SFL",
   R10: "mobile home only",
+  R11: "mobile, modular, or manufactured home",
 };
 
 const SKIP_SUMMARIES = {
