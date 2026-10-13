@@ -85,15 +85,15 @@ export function formatDigestDate(date) {
 }
 
 const RULE_SUMMARIES = {
-  R1: "2-bed over $250k in tri-county",
+  R1: "2-bed over $279k in tri-county",
   R2: "2-bed over $199k rest of FL",
   R3: "condo over $279k",
-  R4: "HOA over $600 under $150k",
+  R4: "HOA over $600 under $699k",
   R5: "land under 5k sqft",
   R6: "3/1 over $375k in tri-county",
   R7: "small 3/1 over $325k in tri-county",
   R8: "frame/wood house",
-  R9: "under 900 sqft outside SFL",
+  R9: "under 900 sqft over $199k outside SFL",
   R10: "mobile home only",
   R11: "mobile, modular, or manufactured home",
 };
