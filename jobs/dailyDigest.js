@@ -88,7 +88,7 @@ const RULE_SUMMARIES = {
   R1: "2-bed over $279k in tri-county",
   R2: "2-bed over $199k rest of FL",
   R3: "condo over $279k",
-  R4: "HOA over $600 under $699k",
+  R4: "HOA over $700 under $150k",
   R5: "land under 5k sqft",
   R6: "3/1 over $375k in tri-county",
   R7: "small 3/1 over $325k in tri-county",
@@ -99,6 +99,7 @@ const RULE_SUMMARIES = {
 };
 
 const SKIP_SUMMARIES = {
+  "no price reduction": "dup with 0% drop",
   "price not low enough": "dup drop under 6%",
   "35% quota": "rest of FL daily cap",
   "35% quota cap": "rest of FL daily cap",
