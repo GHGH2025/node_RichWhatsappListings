@@ -32,9 +32,13 @@ const text = formatDigestMessage({
 
 assert.equal(formatDigestDate("08-09-2026"), "08 Sep 2026");
 assert.equal(formatDigestDate("bad"), "bad");
-assert.equal(formatSkipLabel("R1"), "R1 (2-bed over $250k in tri-county)");
+assert.equal(formatSkipLabel("R1"), "R1 (2-bed over $279k in tri-county)");
 assert.equal(formatSkipLabel("r6"), "R6 (3/1 over $375k in tri-county)");
 assert.equal(formatSkipLabel("R11"), "R11 (mobile, modular, or manufactured home)");
+assert.equal(
+  formatSkipLabel("no price reduction"),
+  "no price reduction (dup with 0% drop)"
+);
 assert.equal(formatSkipLabel("other"), "other");
 
 assert.equal(
